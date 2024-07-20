@@ -1,0 +1,1190 @@
+---
+title: "M9211 Projekt"
+author: "Vojtěch Máčala, 505941"
+execute: 
+  cache: false
+format:
+  html:
+    other-links:
+      - text: U.S. Government Open Data
+        href: https://catalog.data.gov/dataset?publisher=data.cityofnewyork.us
+    code-links:
+      -text: Report online
+      href: https://vojtam.github.io/M9211-projekt-report/
+    toc: true
+    theme: morph
+    page-layout: article
+    fontsize: 1.3em
+    embed-resources: true
+    logo: bike_logo.png
+    lightbox: true
+    code-tools: true
+    code-block-bg: true
+    code-copy: hover
+    code-link: true
+    code-block-border-left: "#31BAE9"
+    code-fold: true
+---
+
+# New York City - East River Bicycle Crossings
+
+Tento projekt je zaměřený na analýzu projetých cyklistů přes mosty v New Yorku.
+
+## Dataset
+
+Newyorský odbor dopravy denně shromažďuje údaje o počtu jízdních kol, která přejedou přes mosty v New Yorku. Tyto údaje se používají k měření využití jízdních kol v rámci dopravního plánování. Tento soubor dat je denní záznam o počtu jízdních kol, která vjela na Manhattan nebo vyjela z Manhattanu přes některý z mostů přes East River (tj. s výjimkou průjezdů Bronxem a tunelů přes řeku Hudson, které nejsou určeny pro cyklisty) za úsek 9 měsíců.
+
+![Historical map of East Side bridges](./bridges.jpg)
+
+```{r}
+#| column: screen
+library(leaflet)
+leaflet() %>%
+    addTiles() %>%
+    addMarkers(lat = 40.756944, lng = -73.954722, popup = "Queensboro Bridge") %>%
+    addMarkers(lat = 40.707, lng = -73.9905, popup = "Manhattan Bridge") %>%
+    addMarkers(lat = 40.7057, lng = -73.9964, popup = "Bro Bridge") %>%
+    addMarkers(lat = 40.7125, lng = -73.9725, popup = "Williamsburg Bridge")
+
+
+
+```
+
+## Explorative Data Analysis, Data Preprocessing
+
+```{r}
+#| warning: false
+#| echo: false
+
+suppressPackageStartupMessages({
+  library(bslib)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(data.table)
+  library(DT)
+  library(patchwork)
+  library(Hmisc)
+  library(readODS)
+  library(ggcorrplot)
+  library(plotly)
+  library(HDInterval)
+})
+
+
+source("./poisson_model.R")
+```
+
+```{r}
+data_path <- file.path("./data/bike_data.ods")
+data <- read_ods(data_path)
+glimpse(data)
+
+data <- data |> mutate(
+        precipitation = ifelse(Precipitation == "T", "0.01", Precipitation) |> as.double(),
+        high_temp_C = (`High Temp (°F)` - 32)  *   ( 5 / 9),
+        low_temp_C = (`Low Temp (°F)` - 32)  *   ( 5 / 9)
+)
+
+data <- data |> mutate(
+        precipitation = precipitation * 25.4 # convert precipitation form inches to mm
+)
+
+data <- data |> mutate(
+        is_rainy = precipitation > 1,
+        is_weekend = Day %in% c("Saturday", "Sunday")
+)
+
+data$week_index <- c(0, rep(1:(nrow(data)      -   1)  %/% 7))
+data_filtered <- select(data, !c("High Temp (°F)", "Low Temp (°F)", "Precipitation"))
+
+data.table::setnames(data_filtered, old = c("Date", "Day", "Total", "Brooklyn Bridge", "Manhattan Bridge", "Williamsburg Bridge", "Queensboro Bridge"), new = c("date", "day", "total", "brooklyn", "manhattan", "williamsburg", "queensboro"))
+
+data_long <- data_filtered |> pivot_longer(cols = c("brooklyn", "manhattan", "williamsburg", "queensboro", "total"))
+```
+
+Data obsahují pro každý z $214$ měřených dnů údaje o počtu cyklistů na sledovaných mostech. Kromě toho obsahují také některé meterologické údaje, a to nejvyšší a nejnižší zaznamenanou teplotu pro daný den, a také úhrn srážek.
+
+Pro snadnější práci a lepší interpretaci jsem převedl teplotní údaje na stupně Celsia a údaje o srážkovém úhrnu na $mm^3$
+
+Dle studií Richadsona (2000) a Phung a Rose (2007) je déšť tím parametrem, který nejvíce ovlivňuje počet cyklistů v Melbourne. Rozhodl jsem se tedy pro vytvoření modelů na základě toho, zda daný den pršelo.
+
+Následně jsem pro snadnější agregaci vytvořil kategorickou proměnnou is_rainy, a to tak, že daný den považuji za deštivý, pokud během něj spadl alespoň milimetr srážek.
+
+Výsledná data vypadají následovně.
+
+```{r}
+data <- fread("data/bike_data_filtered.csv")
+data_long <- fread("data/bike_data_filtered_long.csv")
+glimpse(data)
+
+
+#' @export
+get_weekly_tab <- function(daily_data, var) {
+        weekly_tab <- daily_data  |>
+         group_by(week_index) |>
+                summarise(
+                        weekly_total  = sum( get ({{ var }})),
+                        high_temp_median = median(high_temp_C),
+                        low_temp_median = median(low_temp_C),
+                        mean_precipitation = mean(precipitation)
+                )
+}
+
+#' @export
+get_bridge_tab <- function(data, var) {
+        data |> filter(name == var)
+}
+
+brooklyn_weekly <- get_weekly_tab(data, "brooklyn")
+
+```
+
+Pro některé úlohy jsou vhodnější data v `long` formátu. Pivotováním jsem tedy vytvořil i tuto tabulku.
+
+```{r}
+glimpse(data_long)
+```
+
+```{r}
+summary(data)
+```
+
+```{r}
+var(data$brooklyn)
+```
+
+```{r}
+ggplot(brooklyn_weekly, aes(x = week_index, y = weekly_total)) +
+        geom_bar(stat = "identity", color = "black", fill = "darkorchid") +
+        labs(x = "Index týdne", y = 'Počet cyklistů v daném týdnu')
+```
+Na tomto grafu můžeme vidět, že průměrně se týdenní množství cyklistů na všech mostech dohromady drží kolem 15 až 20 tisíci. Také lze vidět, že kromě druhého pozorovaného týdne je počet cyklistů v prvních několika (jarních) týdnech menší než po zbytek sledovaného období.
+
+```{r}
+M <- as.matrix(data |> select(brooklyn, manhattan, williamsburg, queensboro, total, precipitation, high_temp_C, low_temp_C, week_index))
+R_sp<- rcorr(M, type = "spearman")
+diag(R_sp$P) <- 0
+
+spearman_plot <- ggcorrplot::ggcorrplot(R_sp$r, p.mat = R_sp$P, title = "Spearman's correlations", 
+  lab = TRUE, type = "full", method = "square", outline.color = "white", show.legend = FALSE, pch.cex = 10)
+
+# R <- rcorr(M, type = "pearson")
+# diag(R$P) <- 0
+# 
+# pearson_plot <- ggcorrplot::ggcorrplot(R$r, p.mat = R$P, title = "Pearson's correlations", 
+#   lab = TRUE, type = "full", method = "square", outline.color = "white", show.legend = FALSE, pch.cex = 10)
+# 
+# pearson_plot + spearman_plot
+spearman_plot
+```
+
+Při pohledu na matici Spearmanova korelačního koeficientu lze (dle očekávání) vidět zápornou korelaci mezi počty cyklistů a úhrnem srážek. Taktéž lze pozorovat pozitivní korelaci mezi počtem cyklistů a teplotou.
+
+```{r}
+ggplot(data_long, aes(x = name, y = value, fill = name)) +
+        geom_boxplot() +
+        labs(
+          title = "Daily Bicycle Counts by Bridge",
+           x = "Bridge",
+          y = "Daily Bicycle Count"
+    ) +
+    theme(axis.text.x = element_text(angle = -45, hjust = 0)) # Rotate x-axis labels for readability
+```
+
+```{r}
+  ggplot(data_long, aes(sample = value, colour = factor(name))) +
+    stat_qq() +
+    stat_qq_line() +
+    labs(x = "Theoretical Quantiles", y = "Empirical Quantiles")
+```
+Na QQ plotu můžeme vidět, že u většiny skupin máme důvod se domnívat, že je normalita výrazně porušena.
+
+## Bayesovska analyza
+
+Cílem analýzy je zjistit, jak se během sledovaného období mění počet cyklistů na sledovaných mostech.
+
+### Poissonův model
+
+Pozorujeme i.i.d poissonovské náhodné veličiny $(Y_k \mid \theta) \sim \text{Po}(\theta), \; \; k = 1, \dots , n$.
+
+Náš parametrický prostor je $\mathcal{T} = (0, \infty)$ a výběrový prostor $\mathcal{Y} = \mathcal{N}_0$
+
+Postačující statistikou je celkový počet cyklistů za sledované období: $Y = \sum_{k = 1}^n Y_k$, experiment má pak rozdělení: $$(Y\mid \theta) \sim \text{Po}(n \theta)$$
+
+Věrohodnostní funkce má formu:
+
+$$
+f(y \mid \theta) \propto L(\theta; y) = (n \theta)^y e^{-n  \theta}
+$$
+
+Aposteriorní rozdělení pak definujeme následovně:
+
+$$
+(\Theta \mid Y = y) \sim \text{Gama}(a + y, b + n)
+$$
+
+Některé číselné charakteristiky aposteriorního rozdělení:
+
+$$
+E(\Theta \mid Y = y) = \frac{a + y}{b + n}, \; \; Var(\Theta \mid Y = y) = \frac{a + y}{(b + n)^2}, \;\; \text{Mode}(\Theta \mid Y = y) = \frac{a + y - 1}{b + n}
+$$
+
+## Déštivé vs suché dny
+
+První otázka, která mě ohledně dat zajímala je do jaké míry ovlivní přítomnost deště počet cyklistů.
+
+Pro apriorní model počtu cyklistů ve dnech, kdy pršelo, jsem konzultoval dostupnou relevantní literaturu. Keay (1992) zjistil, že lehký déšť odradil od jízdy na kole až 50 % dotázaných žen. Nankervis (1999) reportuje 67% pokles cyklistů vlivem silného deště. Phang a Rose (2007) pak uvádí "jen" 13 - 25% pokles cyklistů během dešťě v Melbourne.
+
+Pro model počtu cyklistů v dnech, kdy pršelo, jsem se tedy rozhodl pro (vcelku vágní) apriorní informaci, že v těchto případech bude apriorní střední hodnota o 40 % menší než v "suchých" dnech.
+
+### Volba apriorniho a aposteriorního rozdělení
+
+Jelikoz nemame zadnou presnejsi apriorni informaci o parametru $\theta$, pouzijeme pouze slabe informativni rozdeleni. Vhodnou volbou je Gama rozdělení, neboť pro Poissonův model tvoří konjugovaný systém hustot.
+
+Apriorní rozdělení tedy vypadá následovně: $$
+\Theta \sim \text{Gama}(a, b), \quad \mathcal{T} = (0; \infty), \quad a,b > 0, \quad p(\theta) \propto \theta^{a - 1}e^{-b\theta}{b}
+$$
+
+
+Některé z číselných charakteristik tohoto rozdělení: $$
+E(\Theta) = \frac{a}{b}, \quad Var(\Theta) = \frac{a}{b^2}, \quad Mode(\Theta) = \frac{a - 1}{b}
+$$
+
+Stredni hodnotu aposteriorního rozdělení můžeme zapsat jako konvexní kombinaci střední hodnoty apriorního rozdělení a výběrového průměru: $$
+E(\Theta \mid y) = \frac{b}{b + n} E(\Theta) + \frac{n}{b + n} \bar{y}
+$$
+
+Kvůli nedostatku apriorních znalostí jsem se snažil volit parametry apriorního rozdělení tak, aby apriorní střední hodnota byla blízko výběrovému průměru a aby byl apriorní rozptyl mnohem větší než výběrový. Ve všech případech jsem zvolil $b = 0.001 << n$, což vyústí v $E(\Theta \mid y) \approx \bar{y}, \quad Var(\Theta \mid y) \approx \frac{\bar{y}}{n}$. Nechávám tedy data "mluvit samy za sebe".
+
+
+Z výše uvedené diskuze ohledně výkyvu počtu cyklistů během deštivých dní, jsem se rozhodl vytvořit konvexní směs ze dvou apriorních hustot: jedné pro deštivé a druhé pro suché dny.
+
+Tato směs bude mít hustotu:
+$$
+p(\theta) =  \sum_{i = 1}^2 w_i p_i(\theta)
+$$
+kde $\sum_{i = 1}^2 w_i = 1$
+
+Váha "deštivého" rozdělení je dána poměrem deštivých dní (přibližně 0.3), stejně jsem postupoval při výběru váhy pro "suché" rozdělení.
+
+Protože apriorní rozdělení je konvexní směs, aposteriorní rozdělení bude také směsí.
+
+Konkrétní volby parametrů jednotlivých hustot, ze kterých je směs tvořena, uvádím v boxu u každého sledovaného mostu.
+
+
+```{r}
+get_characteristics_df <- function(bridge_name, dry_a, dry_b, rainy_a, rainy_b, n_dry, y_dry, dry_post_tab, n_rainy, y_rainy, rainy_post_tab, weight_dry, weight_rainy) {
+  dry_prior_characteristics_df <- get_prior_poisson_characteristics(dry_a, dry_b, paste(bridge_name, "Dry prior"))
+  dry_prior_characteristics_df <- dry_prior_characteristics_df |> mutate(weight = weight_dry)
+  rainy_prior_characteristics_df <- get_prior_poisson_characteristics(rainy_a, rainy_b, paste(bridge_name, "Rainy prior"))
+  rainy_prior_characteristics_df <- rainy_prior_characteristics_df |> mutate(weight = weight_rainy)
+  
+  
+  dry_characteristics_df <- get_posterior_poisson_characteristics(
+    dry_a,
+    dry_b,
+    n_dry,
+    y_dry,
+    dry_post_tab,
+    paste(bridge_name, "Dry posterior")
+  )
+  dry_characteristics_df <- dry_characteristics_df |>  mutate(weight = weight_dry)
+
+  rainy_characteristics_df <- get_posterior_poisson_characteristics(
+    rainy_a,
+    rainy_b,
+    n_rainy,
+    y_rainy,
+    rainy_post_tab,
+    paste(bridge_name, "Rainy posterior")
+  )
+  rainy_characteristics_df <- rainy_characteristics_df |> mutate(weight = weight_rainy)
+  
+  combined_prior_characteristics <- bind_rows(dry_prior_characteristics_df, rainy_prior_characteristics_df) |>
+    summarise(
+      mean = sum(mean * weight),
+      SD = sqrt(sum((SD^2 + mean^2) * weight) - sum(mean * weight)^2),
+      ETCI.lwr = sum(ETCI.lwr * weight),
+      ETCI.upr = sum(ETCI.upr * weight),
+      HPD.lower = sum(HPD.lower * weight),
+      HPD.upper = sum(HPD.upper * weight)
+    ) |>
+    mutate(
+      MLE = NA,
+      MAP = NA,
+      model = paste(bridge_name, "prior")
+    )
+  
+  combined_posterior_characteristics <- bind_rows(dry_characteristics_df, rainy_characteristics_df) %>%
+    summarise(
+      MLE = sum(MLE * weight),
+      MAP = sum(MAP * weight),
+      mean = sum(mean * weight),
+      SD = sqrt(sum((SD^2 + mean^2) * weight) - sum(mean * weight)^2),
+      ETCI.lwr = sum(ETCI.lwr * weight),
+      ETCI.upr = sum(ETCI.upr * weight),
+      HPD.lower = sum(HPD.lower * weight),
+      HPD.upper = sum(HPD.upper * weight)
+    ) |>
+    mutate(model = paste(bridge_name, "posterior"))
+
+  characteristics_df <- rbind(combined_prior_characteristics, combined_posterior_characteristics)
+  setnames(characteristics_df, c("HPD.lower", "HPD.upper"), c("HPD.lwr", "HPD.upr"))
+  return(characteristics_df)
+}
+```
+
+```{r}
+get_characteristics_reactable <- function(characteristics_df) {
+  if (colnames(characteristics_df)[length(characteristics_df)] == "model") {
+    characteristics_df <- characteristics_df[,c(length(characteristics_df), 1:(length(characteristics_df) - 1))]
+  }
+  datatable(
+    characteristics_df,
+    options = list(
+      pageLength = 16,
+      lengthMenu = c(5, 10, 15, 20)
+    )
+  ) |>
+    formatRound(colnames(characteristics_df)[2:ncol(characteristics_df)], digits = 2, mark = "") |>
+    formatStyle(colnames(characteristics_df), 'text-align' = 'center')
+}
+
+```
+
+```{r}
+dist_mixture <- function(dist_A, dist_B, weight_A, weight_B, model_name, grp_by = "theta"){
+  dist_A <- dist_A |> mutate(weight = weight_A)
+  dist_B <- dist_B |> mutate(weight = weight_B)
+  dist_mix <- bind_rows(dist_A, dist_B)
+  
+  weighted_mixture <- dist_mix |>
+    group_by(!!sym(grp_by)) |>
+    summarise(
+      p = sum(weight * p),
+      model = model_name,
+      .groups = 'drop'
+    )
+  return(weighted_mixture)
+}
+
+```
+
+
+
+```{r}
+get_bridge_analysis <- function(bridge_name, theta_start, theta_end, priors_param_tab) {
+  bridge_data <- get_bridge_tab(data_long, bridge_name)
+  prior_tab_dry <- with(priors_param_tab, get_poisson_prior_tab(theta_start, theta_end, dry_prior_a, dry_prior_b, 0.1, paste(bridge_name, "Dry prior")))
+
+  prior_tab_rainy <- with(priors_param_tab, get_poisson_prior_tab(theta_start, theta_end, rainy_prior_a, rainy_prior_b, 0.1, paste(bridge_name, "Rainy prior")))
+
+  # prior <- bind_rows(prior_tab_dry, prior_tab_rainy)
+  prior <- dist_mixture(prior_tab_dry, prior_tab_rainy, 0.7, 0.3, paste(bridge_name, "prior"))
+
+  theta <- prior_tab_dry$theta
+  dry_data <- bridge_data |> filter(!is_rainy)
+  rainy_data <- bridge_data |> filter(is_rainy)
+
+  n_dry <- nrow(dry_data)
+  y_dry <- sum(dry_data$value)
+  n_rainy <- nrow(rainy_data)
+  y_rainy <- sum(rainy_data$value)
+  
+  dry_weight <- n_dry / (n_dry + n_rainy)
+  rainy_weight <- n_rainy / (n_dry + n_rainy)
+
+  posterior_tab_dry <- with(priors_param_tab, get_poisson_posterior_tab(dry_prior_a, dry_prior_b, n_dry, y_dry, theta, paste(bridge_name, "Dry posterior")))
+  posterior_tab_rainy <- with(priors_param_tab, get_poisson_posterior_tab(rainy_prior_a, rainy_prior_b, n_rainy, y_rainy, theta, paste(bridge_name, "Rainy posterior")))
+
+  # posterior <- bind_rows(posterior_tab_dry, posterior_tab_rainy)
+  posterior <- dist_mixture(posterior_tab_dry, posterior_tab_rainy, dry_weight, rainy_weight, paste(bridge_name, "posterior"))
+
+  likelihood_tab_dry <- get_poisson_likelihood_tab(n_dry, y_dry, theta, 10, paste(bridge_name, "Dry likelihood"))
+  likelihood_tab_rainy <- get_poisson_likelihood_tab(n_rainy, y_rainy, theta, 10, paste(bridge_name, "Rainy likelihood"))
+
+  # likelihood <- bind_rows(likelihood_tab_dry, likelihood_tab_rainy)
+  likelihood <- dist_mixture(likelihood_tab_dry, likelihood_tab_rainy, dry_weight, rainy_weight, paste(bridge_name, "likelihood"))
+
+  full_tab <- bind_rows(prior, posterior, likelihood)
+
+  characteristics_tab <- with(priors_param_tab, get_characteristics_df(bridge_name, dry_prior_a, dry_prior_b, rainy_prior_a, rainy_prior_b, n_dry, y_dry, posterior_tab_dry, n_rainy, y_rainy, posterior_tab_rainy, dry_weight, rainy_weight))
+  return(list(tab = full_tab, characteristics = characteristics_tab))
+}
+```
+
+```{R}
+get_zoomed_plots <- function(full_tab, rainy_xlim_vec, dry_xlim_vec) {
+  dry_plot <- full_tab |> filter(
+    grepl("Dry", model)
+  ) |>
+  get_distribution_plot() +
+    xlim(dry_xlim_vec) +
+    theme(axis.text.x = element_text(angle=45, vjust=1, hjust=1))
+
+rainy_plot <- full_tab |> filter(
+    grepl("Rainy", model)
+  ) |>
+  get_distribution_plot() +
+    xlim(rainy_xlim_vec) +
+    theme(axis.text.x = element_text(angle=45, vjust=1, hjust=1))
+
+  return(rainy_plot + dry_plot)
+}
+```
+
+```{r}
+get_plot <- function(tab) {
+  return(ggplotly(get_distribution_plot(tab)))
+}
+```
+
+::: {.panel-tabset style="background: #cbdffc; padding-top: 1rem; padding-bottom: 1rem;"}
+## Brooklyn
+
+$$
+\text{dry:} \qquad a = 3, \quad b = 0.001
+$$
+
+$$
+\text{rainy:} \qquad a = 1.8, \quad b = 0.001
+$$
+$$
+p(\theta) =  w_{\text{dry}} * p(\theta)_{\text{dry}} + w_{\text{rainy}} + p(\theta)_{\text{rainy}}
+$$
+
+```{r}
+brooklyn_precip_prior_params <- list(dry_prior_a = 3, dry_prior_b = 0.001, rainy_prior_a = 1.8, rainy_prior_b = 0.001)
+bridge_results_brooklyn <- get_bridge_analysis("brooklyn", 0, 3200, brooklyn_precip_prior_params)
+fwrite(bridge_results_brooklyn$tab, "data/brooklyn_full_tab.csv")
+```
+
+```{python}
+#| column: screen
+#| out-width: 100%
+import pandas as pd
+import plotly.express as px
+
+def get_plotly_distribution_plot(full_tab):
+    fig = px.line(full_tab, x='theta', y='p', color='model', line_group='model', labels={'p': 'Probability', 'theta': 'Theta'}, title='Distribution Plot')
+    return fig
+  
+tab = pd.read_csv("./data/brooklyn_full_tab.csv")
+get_plotly_distribution_plot(tab).show()
+```
+
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_tab <- bridge_results_brooklyn$characteristics |> get_characteristics_reactable()
+
+card(full_screen = TRUE,
+     card_header(
+       class = "bg-dark",
+       "Distribution characteristics"
+     ),
+     characteristics_tab)
+```
+
+## Manhattan
+
+$$
+\text{dry:} \qquad a = 5.3, \quad b = 0.001
+$$
+
+$$
+\text{rainy:} \qquad a = 3, \quad b = 0.001
+$$
+$$
+p(\theta) =  w_{\text{dry}} * p(\theta)_{\text{dry}} + w_{\text{rainy}} + p(\theta)_{\text{rainy}}
+$$
+
+```{r}
+manhattan_precip_prior_params <- list(dry_prior_a = 5.3, dry_prior_b = 0.001, rainy_prior_a = 3.18, rainy_prior_b = 0.001)
+bridge_results_manhattan <- get_bridge_analysis("manhattan", 0, 7500, manhattan_precip_prior_params)
+fwrite(bridge_results_manhattan$tab, "data/manhattan_full_tab.csv")
+```
+
+```{python}
+#| column: screen
+#| out-width: 100%
+#| warning: false
+tab = pd.read_csv("./data/manhattan_full_tab.csv")
+get_plotly_distribution_plot(tab).show()
+```
+
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_tab <- bridge_results_manhattan$characteristics |> get_characteristics_reactable()
+
+card(full_screen = TRUE,
+     card_header(
+       class = "bg-dark",
+       "Distribution characteristics"
+     ),
+     characteristics_tab,
+     shiny::markdown("Apriorní rozdělení má střední hodnotu pro suché dny 5300 cyklistů a pro deštivé 3180.
+                     Můžeme vidět, že v dnech bez srážek je aposteriorní střední očekávaný počet cyklistů na mostu v Manhattonu 5964 a v deštivých dnech 3512. Z toho je zřejmé, že apriorní informace byla lehce podhodnocena. Při pohledu na MLE a MAP odhady je ale zřejmé, že apriorní informace měla na tyto výsledky nicotný vliv, a to zejména díky obrovskému apriornímu rozptylu.")
+  )
+
+```
+
+## Queensboro
+
+$$
+\text{dry:} \qquad a = 4.5, \quad b = 0.001
+$$
+
+$$
+\text{rainy:} \qquad a = 2.7, \quad b = 0.001
+$$
+$$
+p(\theta) =  w_{\text{dry}} * p(\theta)_{\text{dry}} + w_{\text{rainy}} + p(\theta)_{\text{rainy}}
+$$
+
+```{r}
+queensboro_precip_prior_params <- list(dry_prior_a = 4.5, dry_prior_b = 0.001, rainy_prior_a = 2.7, rainy_prior_b = 0.001)
+bridge_results_queensboro <- get_bridge_analysis("queensboro", 0, 5500, queensboro_precip_prior_params)
+fwrite(bridge_results_queensboro$tab, "data/queensboro_full_tab.csv")
+
+```
+
+```{python}
+#| column: screen
+#| out-width: 100%
+tab = pd.read_csv("./data/queensboro_full_tab.csv")
+get_plotly_distribution_plot(tab).show()
+```
+
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_tab <- bridge_results_queensboro$characteristics |> get_characteristics_reactable()
+
+card(full_screen = TRUE,
+     card_header(
+       class = "bg-dark",
+       "Distribution characteristics"
+     ),
+     characteristics_tab)
+
+```
+
+## Williamsburg
+
+$$
+\text{dry:} \qquad a = 6, \quad b = 0.001
+$$
+
+$$
+\text{rainy:} \qquad a = 3.6, \quad b = 0.001
+$$
+$$
+p(\theta) =  w_{\text{dry}} * p(\theta)_{\text{dry}} + w_{\text{rainy}} + p(\theta)_{\text{rainy}}
+$$
+
+```{r}
+williamsburg_precip_prior_params <- list(dry_prior_a = 6, dry_prior_b = 0.001, rainy_prior_a = 3.6, rainy_prior_b = 0.001)
+bridge_results_williamsburg <- get_bridge_analysis("williamsburg", 0, 8500, williamsburg_precip_prior_params)
+fwrite(bridge_results_williamsburg$tab, "data/williamsburg_full_tab.csv")
+
+
+```
+
+```{python}
+#| column: screen
+#| out-width: 100%
+import pandas as pd
+
+def get_plotly_distribution_plot(full_tab):
+    fig = px.line(full_tab, x='theta', y='p', color='model', line_group='model', labels={'p': 'Probability', 'theta': 'Theta'}, title='Distribution Plot')
+    return fig
+
+tab = pd.read_csv("./data/williamsburg_full_tab.csv")
+get_plotly_distribution_plot(tab).show()
+```
+
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_tab <- bridge_results_williamsburg$characteristics |> get_characteristics_reactable()
+
+card(full_screen = TRUE,
+     card_header(
+       class = "bg-dark",
+       "Distribution characteristics"
+     ),
+     characteristics_tab)
+
+```
+
+## Total
+
+$$
+\text{dry:} \qquad a = 18.5, \quad b = 0.001
+$$ $$
+\text{rainy:} \qquad a = 11.1, \quad b = 0.001
+$$
+$$
+p(\theta) =  w_{\text{dry}} * p(\theta)_{\text{dry}} + w_{\text{rainy}} + p(\theta)_{\text{rainy}}
+$$
+
+```{r}
+total_precip_prior_params <- list(dry_prior_a = 18.5, dry_prior_b = 0.001, rainy_prior_a = 11.1, rainy_prior_b = 0.001)
+bridge_results_total <- get_bridge_analysis("total", 0, 23000, total_precip_prior_params)
+fwrite(bridge_results_total$tab, "data/total_full_tab.csv")
+
+
+```
+
+```{python}
+#| column: screen
+#| out-width: 100%
+import pandas as pd
+
+def get_plotly_distribution_plot(full_tab):
+    fig = px.line(full_tab, x='theta', y='p', color='model', line_group='model', labels={'p': 'Probability', 'theta': 'Theta'}, title='Distribution Plot')
+    return fig
+
+tab = pd.read_csv("./data/total_full_tab.csv")
+#get_plotly_distribution_plot(tab).show()
+```
+
+```{r}
+get_distribution_plot(bridge_results_total$tab) |> print()
+```
+
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_tab <- bridge_results_total$characteristics |> get_characteristics_reactable()
+
+card(full_screen = TRUE,
+     card_header(
+       class = "bg-dark",
+       "Distribution characteristics"
+     ),
+     characteristics_tab)
+
+```
+
+$$
+\text{rainy:} \qquad a = 11.1, \quad b = 0.001
+$$
+:::
+
+```{r}
+tab_all_bridges <- bind_rows(
+  bridge_results_brooklyn$tab,
+  bridge_results_manhattan$tab,
+  bridge_results_queensboro$tab,
+  bridge_results_williamsburg$tab
+)
+
+characteristics_all_bridges <- bind_rows(
+  bridge_results_brooklyn$characteristics,
+  bridge_results_manhattan$characteristics,
+  bridge_results_queensboro$characteristics,
+  bridge_results_williamsburg$characteristics
+)
+
+fwrite(tab_all_bridges, "data/tab_all_bridges.csv")
+
+```
+
+### Charakteristiky všech rozdělení
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_tab <- characteristics_all_bridges |> get_characteristics_reactable()
+card(full_screen = TRUE,
+     card_header(
+       class = "bg-dark",
+       "Distribution characteristics"
+     ),
+     characteristics_tab
+  )
+```
+
+Podle očekávání se potvrzuje, že střední hodnota a MAP jsou u všech mostů nižší pro deštivé dny. Stejně tak je jasné, že naše apriorní rozdělení je velice slabě informativní a dosažené výsledky se téměř neliší od maximálně věrohodných odhadů.
+
+```{python}
+#| warning: false
+#| echo: false
+#tab = pd.read_csv("./data/tab_all_bridges.csv")
+#get_plotly_distribution_plot(tab).show()
+```
+
+## Prediktivní rozdělení
+
+Na závěr je vhodné se také podívat na možnost predikce pro další (dosud nepozorované dny). Sestrojíme tedy prediktivní rozdělení.
+
+Prediktivní rozdělení v Poissonovu modelu má negativně binomické rozdělení:
+
+$$
+(Y^*_{n + 1} \mid Y = y) \sim \text{NBi}\biggl(a + y, \frac{b + n}{b + n + 1}\biggl)
+$$
+
+Vybrané číselné charakteristiky tohoto rozdělení vypadají následovně:
+
+$$
+E(Y^*_{n + 1} \mid Y = y) = \frac{a + y}{b + n} \quad Var(Y^*_{n + 1} \mid Y =y) = \frac{(a + y) (b + n + 1)}{(b + n)^2}
+$$
+
+```{r}
+
+mix_pred <- function(dist_A, dist_B, weight_A, weight_B, model_name, grp_by = "y.pred"){
+  dist_A <- dist_A |> mutate(weight = weight_A)
+  dist_B <- dist_B |> mutate(weight = weight_B)
+  dist_mix <- bind_rows(dist_A, dist_B)
+  
+  weighted_mixture <- dist_mix |>
+    group_by(!!sym(grp_by)) |>
+    summarise(
+      f = sum(weight * f),
+      model = model_name,
+      .groups = 'drop'
+    )
+  return(weighted_mixture)
+}
+
+plot_predictive <- function(pred_start, pred_end, prior_params, bridge_name) {
+  predict_dry_tab <- with(prior_params, predict_neg_bin_prior(pred_start, pred_end, dry_prior_a, dry_prior_b, "Dry marginal"))
+  
+  predict_rainy_tab <- with(prior_params, predict_neg_bin_prior(pred_start, pred_end, rainy_prior_a, rainy_prior_b, "Rainy marginal"))
+  
+  
+  marginal <- mix_pred(predict_dry_tab, predict_rainy_tab, 0.7, 0.3, "marginal", "y.pred")
+  
+  bridge_data <- get_bridge_tab(data_long, bridge_name)
+  dry_data <- bridge_data |> filter(!is_rainy)
+  rainy_data <- bridge_data |> filter(is_rainy)
+  
+  n_dry <- nrow(dry_data)
+  y_dry <- sum(dry_data$value)
+  n_rainy <- nrow(rainy_data)
+  y_rainy <- sum(rainy_data$value)
+  
+  dry_weight <- n_dry / (n_dry + n_rainy)
+  rainy_weight <- n_rainy / (n_dry + n_rainy)
+  
+  post_pred_dry <- with(prior_params, predict_neg_bin_posterior(pred_start, pred_end, dry_prior_a, dry_prior_b, y_dry, n_dry, 1, "Dry posterior"))
+  post_pred_rainy <- with(prior_params, predict_neg_bin_posterior(pred_start, pred_end, rainy_prior_a, rainy_prior_b, y_rainy, n_rainy, 1, "Rainy posterior"))
+  
+  post_predict <- mix_pred(post_pred_dry, post_pred_rainy, dry_weight, rainy_weight, "posterior", "y.pred")
+  
+  pred_full <- rbind(marginal, post_predict)
+  
+  predict_plot <- get_predict_dist_plots(pred_full, "predikovaný počet cyklistů")
+  print(predict_plot)
+}
+
+characteristics_pred_card <- function(prior_params, bridge_name) {
+  bridge_data <- get_bridge_tab(data_long, bridge_name)
+  dry_data <- bridge_data |> filter(!is_rainy)
+  rainy_data <- bridge_data |> filter(is_rainy)
+  
+  n_dry <- nrow(dry_data)
+  y_dry <- sum(dry_data$value)
+  n_rainy <- nrow(rainy_data)
+  y_rainy <- sum(rainy_data$value)
+  
+  dry_weight <- n_dry / (n_dry + n_rainy)
+  rainy_weight <- n_rainy / (n_dry + n_rainy)
+  
+  dry_marginal_characteristics <- with(prior_params, predict_neg_bin_marginal_characteristics(dry_prior_a, dry_prior_b, "Dry marginal"))
+  dry_marginal_characteristics <- dry_marginal_characteristics |> mutate(weight = dry_weight)
+  rainy_marginal_characteristics <- with(prior_params, predict_neg_bin_marginal_characteristics(rainy_prior_a, rainy_prior_b, "Rainy marginal"))
+  rainy_marginal_characteristics <- rainy_marginal_characteristics |> mutate(weight = rainy_weight)
+  
+  combined_marginal_characteristics <- bind_rows(dry_marginal_characteristics, rainy_marginal_characteristics) %>%
+    summarise(
+      mean = sum(mean * weight),
+      SD = sqrt(sum((SD^2 + mean^2) * weight) - sum(mean * weight)^2),
+      lower = sum(lower * weight),
+      upper = sum(upper * weight),
+    ) |>
+    mutate(model = paste(bridge_name, "marginal predictive"))
+  
+  dry_posterior_characteristics <- with(prior_params, predict_neg_bin_posterior_characteristics(dry_prior_a, dry_prior_b, y_dry, n_dry, "Dry posterior"))
+  dry_posterior_characteristics <- dry_posterior_characteristics |> mutate(weight = dry_weight)
+  rainy_posterior_characteristics <- with(prior_params, predict_neg_bin_posterior_characteristics(rainy_prior_a, rainy_prior_b, y_rainy, n_rainy, "Rainy posterior"))
+  rainy_posterior_characteristics <- rainy_posterior_characteristics |> mutate(weight = rainy_weight)
+
+  combined_posterior_characteristics <- bind_rows(dry_posterior_characteristics, rainy_posterior_characteristics) %>%
+    summarise(
+      mean = sum(mean * weight),
+      SD = sqrt(sum((SD^2 + mean^2) * weight) - sum(mean * weight)^2),
+      lower = sum(lower * weight),
+      upper = sum(upper * weight),
+    ) |>
+    mutate(model = paste(bridge_name, "posterior predictive"))
+  
+  pred_characteristics_df <- bind_rows(combined_marginal_characteristics, combined_posterior_characteristics)
+  pred_characteristics_DT <- get_characteristics_reactable(pred_characteristics_df)
+  
+  card(full_screen = TRUE,
+       card_header(
+         class = "bg-dark",
+         paste(bridge_name, "Predictive Distribution Characteristics")
+       ),
+       pred_characteristics_DT)
+}
+
+```
+
+::: {.panel-tabset style="background: #cbdffc; padding-top: 1rem; padding-bottom: 1rem;"}
+## Brooklyn
+
+```{r}
+plot_predictive(0, 3500, brooklyn_precip_prior_params, "brooklyn")
+
+```
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_pred_card(brooklyn_precip_prior_params, "brooklyn")
+```
+
+## Manhattan
+
+```{r}
+plot_predictive(0, 7000, manhattan_precip_prior_params, "manhattan")
+
+```
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_pred_card(manhattan_precip_prior_params, "manhattan")
+```
+
+## Queensboro
+
+```{r}
+plot_predictive(0, 5500, queensboro_precip_prior_params, "queensboro")
+
+```
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_pred_card(queensboro_precip_prior_params, "queensboro")
+```
+
+## Williamsburg
+
+```{r}
+plot_predictive(0, 8000, williamsburg_precip_prior_params, "williamsburg")
+
+```
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_pred_card(williamsburg_precip_prior_params, "williamsburg")
+```
+:::
+
+## Všední vs víkendové dny
+
+Další z otázek, kterou bych chtěl zodpovědět je, jak se liší distribuce cyklistů mezi víkendem a pracovními dny. Je možné, že během pracovních dní bude více cyklistů vlivem dojíždění do zaměstnání. Stejně tak je ale možné, že o víkendu bude více sportujících, a tedy i více cyklistů.
+
+### Volba apriorního rozdělení
+
+Ani v tomto případě nemáme přesnou apriorní informaci o parametru $\theta$. Taktéž bych se nerad spoléhal na existující literaturu, a proto zvolím zcela neinformativní rozdělení ve formě Jeffreysovy hustoty. Pro jednoduchost budu opět pracovat s konjugovaným systémem hustot.
+
+Jeffreysova hustota má tvar $p(\theta) \propto \frac{1}{\sqrt{\theta}}$, což limitně odpovídá rozdělení $Gama(a = \frac{1}{2}, b = 0)$
+
+```{r}
+get_characteristics_day_df <- function(bridge_name, prior_a, prior_b, n_weekday, y_weekday, weekday_post_tab, n_weekend, y_weekend, weekend_post_tab) {
+  #prior_characteristics_df <- get_prior_poisson_characteristics(prior_a, prior_b, paste(bridge_name, "prior"))
+  weekday_characteristics_df <- get_posterior_poisson_characteristics(
+    prior_a,
+    prior_b,
+    n_weekday,
+    y_weekday,
+    weekday_post_tab,
+    paste(bridge_name, "Weekday posterior")
+  )
+
+  weekend_characteristics_df <- get_posterior_poisson_characteristics(
+    prior_a,
+    prior_b,
+    n_weekend,
+    y_weekend,
+    weekend_post_tab,
+    paste(bridge_name, "Weekend posterior")
+  )
+
+  characteristics_df <- rbind(weekday_characteristics_df, weekend_characteristics_df)
+  setnames(characteristics_df, c("HPD.lower", "HPD.upper"), c("HPD.lwr", "HPD.upr"))
+  return(characteristics_df)
+}
+```
+
+```{r}
+get_bridge_day_analysis <- function(bridge_name, data_long, theta_start, theta_end, priors_param_tab) {
+  bridge_data <- get_bridge_tab(data_long, bridge_name)
+
+  prior_tab <- with(priors_param_tab, get_poisson_prior_tab(theta_start, theta_end, prior_a, prior_b, 0.1,  "prior", TRUE))
+
+
+  theta <- prior_tab$theta
+  weekday_data <- bridge_data |> filter(!is_weekend)
+  weekend_data <- bridge_data |> filter(is_weekend)
+
+  n_weekday <- nrow(weekday_data)
+  y_weekday <- sum(weekday_data$value)
+  n_weekend <- nrow(weekend_data)
+  y_weekend <- sum(weekend_data$value)
+
+  posterior_tab_weekday <- with(priors_param_tab, get_poisson_posterior_tab(prior_a, prior_b, n_weekday, y_weekday, theta, paste(bridge_name, "Weekday posterior")))
+  posterior_tab_weekend <- with(priors_param_tab, get_poisson_posterior_tab(prior_a, prior_b, n_weekend, y_weekend, theta, paste(bridge_name, "Weekend posterior")))
+
+  posterior <- bind_rows(posterior_tab_weekday, posterior_tab_weekend)
+
+  likelihood_tab_weekday <- get_poisson_likelihood_tab(n_weekday, y_weekday, theta, 10, paste(bridge_name, "Weekday likelihood"))
+  likelihood_tab_weekend <- get_poisson_likelihood_tab(n_weekend, y_weekend, theta, 10, paste(bridge_name, "Weekend likelihood"))
+
+  likelihood <- bind_rows(likelihood_tab_weekday, likelihood_tab_weekend)
+
+  full_tab <- bind_rows(prior_tab, posterior, likelihood)
+
+  characteristics_tab <- with(priors_param_tab, get_characteristics_day_df(bridge_name, prior_a, prior_b, n_weekday, y_weekday, posterior_tab_weekday, n_weekend, y_weekend, posterior_tab_weekend))
+  return(list(tab = full_tab, characteristics = characteristics_tab))
+}
+```
+
+```{R}
+get_zoomed_plots <- function(full_tab, weekend_xlim_vec, weekday_xlim_vec) {
+  weekday_tab <- full_tab |> filter(
+    grepl("Weekday|prior", model)
+  )
+  
+  weekday_plot <- weekday_tab |> get_distribution_plot() +
+    xlim(weekday_xlim_vec) +
+    ylim(c(0, 0.1)) +
+    theme(axis.text.x = element_text(angle=45, vjust=1, hjust=1))
+
+  weekend_tab <- full_tab |> filter(
+    grepl("Weekend|prior", model)
+  )
+weekend_plot <- weekend_tab |>
+  get_distribution_plot() +
+    xlim(weekend_xlim_vec) +
+    ylim(c(0, 0.1)) +
+    theme(axis.text.x = element_text(angle=45, vjust=1, hjust=1))
+
+  return(weekend_plot + weekday_plot)
+}
+```
+
+::: {.panel-tabset style="background: #cbdffc; padding-top: 1rem; padding-bottom: 1rem;"}
+## brooklyn
+
+
+```{r}
+brooklyn_day_prior_params <- list(prior_a = 1/2, prior_b = 0)
+bridge_results_brooklyn_day <- get_bridge_day_analysis("brooklyn", data_long, 0, 5500, brooklyn_day_prior_params)
+fwrite(bridge_results_brooklyn_day$tab, "data/brooklyn_full_tab_day.csv")
+
+```
+
+```{python}
+#| column: screen
+#| out-width: 100%
+tab = pd.read_csv("./data/brooklyn_full_tab_day.csv")
+
+def get_plotly_distribution_plot(full_tab):
+    fig = px.line(full_tab, x='theta', y='p', color='model', line_group='model', labels={'p': 'Probability', 'theta': 'Theta'}, title='Distribution Plot')
+    fig.update_layout(yaxis_range=[0,1])
+    return fig
+  
+get_plotly_distribution_plot(tab).show()
+```
+
+```{r}
+#| warning: false
+
+plot <- get_zoomed_plots(bridge_results_brooklyn_day$tab, c(2408, 2448), c(2762, 2802))
+suppressWarnings(print(plot))
+```
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_tab <- bridge_results_brooklyn_day$characteristics |> get_characteristics_reactable()
+
+card(full_screen = TRUE,
+     card_header(
+       class = "bg-dark",
+       "Distribution characteristics"
+     ),
+     characteristics_tab)
+
+```
+
+## Manhattan
+
+```{r}
+manhattan_day_prior_params <- list(prior_a = 1/2, prior_b = 0)
+bridge_results_manhattan_day <- get_bridge_day_analysis("manhattan", data_long, 0, 5500, manhattan_day_prior_params)
+fwrite(bridge_results_manhattan_day$tab, "data/manhattan_full_tab_day.csv")
+
+```
+
+```{python}
+#| column: screen
+#| out-width: 100%
+tab = pd.read_csv("./data/manhattan_full_tab_day.csv")
+get_plotly_distribution_plot(tab).show()
+```
+
+```{r}
+#| warning: false
+
+plot <- get_zoomed_plots(bridge_results_manhattan_day$tab, c(4056, 4116), c(5829, 5889))
+suppressWarnings(print(plot))
+```
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_tab <- bridge_results_manhattan_day$characteristics |> get_characteristics_reactable()
+
+card(full_screen = TRUE,
+     card_header(
+       class = "bg-dark",
+       "Distribution characteristics"
+     ),
+     characteristics_tab)
+
+```
+
+## Queensboro
+
+```{r}
+queensboro_day_prior_params <- list(prior_a = 1/2, prior_b = 0)
+bridge_results_queensboro_day <- get_bridge_day_analysis("queensboro", data_long,  0, 5500, queensboro_day_prior_params)
+fwrite(bridge_results_queensboro_day$tab, "data/queensboro_full_tab_day.csv")
+
+```
+
+```{python}
+#| column: screen
+#| out-width: 100%
+tab = pd.read_csv("./data/queensboro_full_tab_day.csv")
+get_plotly_distribution_plot(tab).show()
+```
+
+```{r}
+#| warning: false
+
+plot <- get_zoomed_plots(bridge_results_queensboro_day$tab, c(3617, 3657), c(4901, 4943))
+suppressWarnings(print(plot))
+```
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_tab <- bridge_results_queensboro_day$characteristics |> get_characteristics_reactable()
+
+card(full_screen = TRUE,
+     card_header(
+       class = "bg-dark",
+       "Distribution characteristics"
+     ),
+     characteristics_tab)
+
+```
+
+## Williamsburg
+
+```{r}
+williamsburg_day_prior_params <- list(prior_a = 1/2, prior_b = 0)
+bridge_results_williamsburg_day <- get_bridge_day_analysis("williamsburg", data_long, 0, 7000, williamsburg_day_prior_params)
+fwrite(bridge_results_williamsburg_day$tab, "data/williamsburg_full_tab_day.csv")
+
+```
+
+```{python}
+#| column: screen
+#| out-width: 100%
+tab = pd.read_csv("./data/williamsburg_full_tab_day.csv")
+get_plotly_distribution_plot(tab).show()
+```
+
+```{r}
+#| warning: false
+
+plot <- get_zoomed_plots(bridge_results_williamsburg_day$tab, c(4847, 4887), c(6514, 6564))
+suppressWarnings(print(plot))
+```
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_tab <- bridge_results_williamsburg_day$characteristics |> get_characteristics_reactable()
+
+card(full_screen = TRUE,
+     card_header(
+       class = "bg-dark",
+       "Distribution characteristics"
+     ),
+     characteristics_tab)
+
+```
+
+## total
+
+```{r}
+total_day_prior_params <- list(prior_a = 1/2, prior_b = 0)
+bridge_results_total_day <- get_bridge_day_analysis("total", data_long, 14400, 21000, total_day_prior_params)
+fwrite(bridge_results_total_day$tab, "data/total_full_tab_day.csv")
+
+```
+
+```{python}
+#| column: screen
+#| out-width: 100%
+tab = pd.read_csv("./data/total_full_tab_day.csv")
+get_plotly_distribution_plot(tab).show()
+```
+
+```{r}
+plot <- get_zoomed_plots(bridge_results_total_day$tab, c(14990, 15050), c(20069, 20129))
+suppressWarnings(print(plot))
+```
+
+```{r}
+#| column: screen
+#| out-width: 100%
+characteristics_tab <- bridge_results_total_day$characteristics |> get_characteristics_reactable()
+
+card(full_screen = TRUE,
+     card_header(
+       class = "bg-dark",
+       "Distribution characteristics"
+     ),
+     characteristics_tab)
+
+```
+:::
+
+
+### Závěr
+Záměrem tohoto projektu bylo analyzovat počet cyklistů během 214 roku 2016. Analýza těchto dat může být vhodná například pro plánování údržby, výstavby nových cyklistických tras a stezek, urbanistické plánování a policy-making.
+Mě samotného zajímaly odpovědi na dvě otázky. Ta první se týká toho, o kolik procent poklesne počet cyklistů ve dnech, kdy byl zaznamenán úhrn srážek (alespon $1 mm^3$). Druhá otázka se zaobírá počtem cyklistů o víkendech a ve všedních dnech. Zajímá mě, jestli více lidí využívá kolo k dojíždění za prací, nebo k víkendovému sportovnímu vyžití.
+Bayesovská analýza ukázala, že v deštivých dnech můžeme očekávat zhruba 40% úbytek počtu cyklistů.
+Dalším závěrem analýzy je, že výrazně více lidí vyráží na kolo během pracovních dni.
+
