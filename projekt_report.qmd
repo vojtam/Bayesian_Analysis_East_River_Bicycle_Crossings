@@ -10,7 +10,7 @@ format:
         href: https://catalog.data.gov/dataset?publisher=data.cityofnewyork.us
     code-links:
       -text: Report online
-      href: https://vojtam.github.io/M9211-projekt-report/
+      href: https://github.com/vojtam/Bayesian_Analysis_East_River_Bicycle_Crossings
     toc: true
     theme: morph
     page-layout: article
