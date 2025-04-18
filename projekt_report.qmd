@@ -1,6 +1,6 @@
 ---
-title: "M9211 Projekt"
-author: "Vojtěch Máčala, 505941"
+title: "East River Bicycle Crossings - Bayesian Analysis"
+author: "Vojtěch Máčala"
 execute: 
   cache: false
 format:
