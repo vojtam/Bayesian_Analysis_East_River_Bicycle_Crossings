@@ -1,0 +1,135 @@
+
+```{r}
+get_characteristics_df <- function(bridge_name, weekday_a, weekday_b, weekend_a, weekend_b, n_weekday, y_weekday, weekday_post_tab, n_weekend, y_weekend, weekend_post_tab) {
+  weekday_prior_characteristics_df <- get_prior_poisson_characteristics(weekday_a, weekday_b, paste(bridge_name, "Weekday prior"))
+  weekend_prior_characteristics_df <- get_prior_poisson_characteristics(weekend_a, weekend_b, paste(bridge_name, "Weekend prior"))
+  weekday_characteristics_df <- get_posterior_poisson_characteristics(
+    weekday_a,
+    weekday_b,
+    n_weekday,
+    y_weekday,
+    weekday_post_tab,
+    paste(bridge_name, "Weekday posterior")
+  )
+
+  weekend_characteristics_df <- get_posterior_poisson_characteristics(
+    weekend_a,
+    weekend_b,
+    n_weekend,
+    y_weekend,
+    weekend_post_tab,
+    paste(bridge_name, "Weekend posterior")
+  )
+
+  characteristics_df <- rbind(weekday_prior_characteristics_df, weekend_prior_characteristics_df, weekday_characteristics_df, weekend_characteristics_df)
+  setnames(characteristics_df, c("HPD.lower", "HPD.upper"), c("HPD.lwr", "HPD.upr"))
+  return(characteristics_df)
+}
+```
+
+```{r}
+get_characteristics_reactable <- function(characteristics_df) {
+  datatable(
+    characteristics_df,
+    options = list(
+      pageLength = 16,
+      lengthMenu = c(5, 10, 15, 20)
+    )
+  ) |>
+    formatRound(colnames(characteristics_df)[2:ncol(characteristics_df)], digits = 2, mark = "") |>
+    formatStyle(colnames(characteristics_df), 'text-align' = 'center')
+}
+
+```
+
+```{r}
+get_bridge_analysis <- function(bridge_name, theta_start, theta_end, priors_param_tab) {
+  bridge_data <- get_bridge_tab(data_long, bridge_name)
+  prior_tab_weekday <- with(priors_param_tab, get_poisson_prior_tab(theta_start, theta_end, weekday_prior_a, weekday_prior_b, 0.1, paste(bridge_name, "Weekday prior")))
+
+  prior_tab_weekend <- with(priors_param_tab, get_poisson_prior_tab(theta_start, theta_end, weekend_prior_a, weekend_prior_b, 0.1, paste(bridge_name, "Weekend prior")))
+
+  prior <- bind_rows(prior_tab_weekday, prior_tab_weekend)
+
+  theta <- prior_tab_weekday$theta
+  weekday_data <- bridge_data |> filter(!is_weekend)
+  weekend_data <- bridge_data |> filter(is_weekend)
+
+  n_weekday <- nrow(weekday_data)
+  y_weekday <- sum(weekday_data$value)
+  n_weekend <- nrow(weekend_data)
+  y_weekend <- sum(weekend_data$value)
+
+  posterior_tab_weekday <- with(priors_param_tab, get_poisson_posterior_tab(weekday_prior_a, weekday_prior_b, n_weekday, y_weekday, theta, paste(bridge_name, "Weekday posterior")))
+  posterior_tab_weekend <- with(priors_param_tab, get_poisson_posterior_tab(weekend_prior_a, weekend_prior_b, n_weekend, y_weekend, theta, paste(bridge_name, "Weekend posterior")))
+
+  posterior <- bind_rows(posterior_tab_weekday, posterior_tab_weekend)
+
+  likelihood_tab_weekday <- get_poisson_likelihood_tab(n_weekday, y_weekday, theta, 10, paste(bridge_name, "Weekday likelihood"))
+  likelihood_tab_weekend <- get_poisson_likelihood_tab(n_weekend, y_weekend, theta, 10, paste(bridge_name, "Weekend likelihood"))
+
+  likelihood <- bind_rows(likelihood_tab_weekday, likelihood_tab_weekend)
+
+  full_tab <- bind_rows(prior, posterior, likelihood)
+
+  characteristics_tab <- with(priors_param_tab, get_characteristics_df(bridge_name, weekday_prior_a, weekday_prior_b, weekend_prior_a, weekend_prior_b, n_weekday, y_weekday, posterior_tab_weekday, n_weekend, y_weekend, posterior_tab_weekend))
+  return(list(tab = full_tab, characteristics = characteristics_tab))
+}
+```
+
+```{R}
+get_zoomed_plots <- function(full_tab, weekend_xlim_vec, weekday_xlim_vec) {
+  weekday_plot <- full_tab |> filter(
+    grepl("Weekday", model)
+  ) |>
+  get_distribution_plot() +
+    xlim(weekday_xlim_vec) +
+    theme(axis.text.x = element_text(angle=45, vjust=1, hjust=1))
+
+weekend_plot <- full_tab |> filter(
+    grepl("Weekend", model)
+  ) |>
+  get_distribution_plot() +
+    xlim(weekend_xlim_vec) +
+    theme(axis.text.x = element_text(angle=45, vjust=1, hjust=1))
+
+  return(weekend_plot + weekday_plot)
+}
+```
+
+
+
+## total
+
+
+```{r}
+total_day_prior_params <- list(prior_a = 1/2, prior_b = 0)
+bridge_results_total_day <- get_bridge_day_analysis("total", 0, 5500, total_day_prior_params)
+fwrite(bridge_results_total_day$tab, "data/total_full_tab_day.csv")
+
+```
+
+```{python}
+tab = pd.read_csv("./data/total_full_tab_day.csv")
+get_plotly_distribution_plot(tab).show()
+```
+
+```{r}
+#| warning: false
+
+plot <- get_zoomed_plots(bridge_results_total_day$tab, c(2408, 2448), c(2762, 2802))
+suppressWarnings(print(plot))
+```
+
+```{r}
+
+characteristics_tab <- bridge_results_total_day$characteristics |> get_characteristics_reactable()
+
+card(full_screen = TRUE,
+     card_header(
+       class = "bg-dark",
+       "Distribution characteristics"
+     ),
+     characteristics_tab)
+
+```

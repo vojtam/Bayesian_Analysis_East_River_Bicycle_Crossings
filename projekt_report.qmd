@@ -28,11 +28,11 @@ format:
 
 # New York City - East River Bicycle Crossings
 
-Tento projekt je zaměřený na analýzu projetých cyklistů přes mosty v New Yorku.
+This project focuses on analyzing cyclist crossings over bridges in New York City.
 
 ## Dataset
 
-Newyorský odbor dopravy denně shromažďuje údaje o počtu jízdních kol, která přejedou přes mosty v New Yorku. Tyto údaje se používají k měření využití jízdních kol v rámci dopravního plánování. Tento soubor dat je denní záznam o počtu jízdních kol, která vjela na Manhattan nebo vyjela z Manhattanu přes některý z mostů přes East River (tj. s výjimkou průjezdů Bronxem a tunelů přes řeku Hudson, které nejsou určeny pro cyklisty) za úsek 9 měsíců.
+The New York City Department of Transportation collects daily data on the number of bicycles crossing bridges in NYC. This data is used to measure bicycle usage for transportation planning. This dataset is a daily record of the number of bicycles entering or leaving Manhattan via one of the East River bridges (i.e., excluding crossings in the Bronx and Hudson River tunnels, which are not intended for cyclists) over a 9-month period.
 
 ![Historical map of East Side bridges](./bridges.jpg)
 
@@ -69,14 +69,16 @@ suppressPackageStartupMessages({
   library(ggcorrplot)
   library(plotly)
   library(HDInterval)
+  library(reticulate)
 })
 
-
+py_require("pandas")
+py_require("plotly")
 source("./poisson_model.R")
 ```
 
 ```{r}
-data_path <- file.path("./data/bike_data.ods")
+data_path <- file.path("data/bike_data.ods")
 data <- read_ods(data_path)
 glimpse(data)
 
@@ -103,16 +105,15 @@ data.table::setnames(data_filtered, old = c("Date", "Day", "Total", "Brooklyn Br
 data_long <- data_filtered |> pivot_longer(cols = c("brooklyn", "manhattan", "williamsburg", "queensboro", "total"))
 ```
 
-Data obsahují pro každý z $214$ měřených dnů údaje o počtu cyklistů na sledovaných mostech. Kromě toho obsahují také některé meterologické údaje, a to nejvyšší a nejnižší zaznamenanou teplotu pro daný den, a také úhrn srážek.
+The data contains, for each of the $214$ measured days, information on the number of cyclists on the monitored bridges. Additionally, it includes some meteorological data, specifically the highest and lowest recorded temperatures for the day, as well as the total precipitation.
 
-Pro snadnější práci a lepší interpretaci jsem převedl teplotní údaje na stupně Celsia a údaje o srážkovém úhrnu na $mm^3$
+For easier work and better interpretation, I converted the temperature data to degrees Celsius and the precipitation data to $mm^3$.
 
-Dle studií Richadsona (2000) a Phung a Rose (2007) je déšť tím parametrem, který nejvíce ovlivňuje počet cyklistů v Melbourne. Rozhodl jsem se tedy pro vytvoření modelů na základě toho, zda daný den pršelo.
+According to studies by Richardson (2000) and Phung and Rose (2007), rain is the parameter that most affects the number of cyclists in Melbourne. Therefore, I decided to create models based on whether it rained on a given day.
 
-Následně jsem pro snadnější agregaci vytvořil kategorickou proměnnou is_rainy, a to tak, že daný den považuji za deštivý, pokud během něj spadl alespoň milimetr srážek.
+Subsequently, for easier aggregation, I created a categorical variable `is_rainy`, considering a day rainy if at least one millimeter of precipitation fell during it.
 
-Výsledná data vypadají následovně.
-
+The resulting data looks as follows.
 ```{r}
 data <- fread("data/bike_data_filtered.csv")
 data_long <- fread("data/bike_data_filtered_long.csv")
@@ -140,7 +141,7 @@ brooklyn_weekly <- get_weekly_tab(data, "brooklyn")
 
 ```
 
-Pro některé úlohy jsou vhodnější data v `long` formátu. Pivotováním jsem tedy vytvořil i tuto tabulku.
+For some tasks, data in the `long` format is more suitable. By pivoting, I also created this table.
 
 ```{r}
 glimpse(data_long)
@@ -157,9 +158,9 @@ var(data$brooklyn)
 ```{r}
 ggplot(brooklyn_weekly, aes(x = week_index, y = weekly_total)) +
         geom_bar(stat = "identity", color = "black", fill = "darkorchid") +
-        labs(x = "Index týdne", y = 'Počet cyklistů v daném týdnu')
+        labs(x = "Week index", y = 'Number of cyclists in the given week')
 ```
-Na tomto grafu můžeme vidět, že průměrně se týdenní množství cyklistů na všech mostech dohromady drží kolem 15 až 20 tisíci. Také lze vidět, že kromě druhého pozorovaného týdne je počet cyklistů v prvních několika (jarních) týdnech menší než po zbytek sledovaného období.
+In this graph, we can see that the average weekly number of cyclists across all bridges combined stays around 15 to 20 thousand. It can also be observed that, except for the second observed week, the number of cyclists in the first few (spring) weeks is lower than for the rest of the monitored period.
 
 ```{r}
 M <- as.matrix(data |> select(brooklyn, manhattan, williamsburg, queensboro, total, precipitation, high_temp_C, low_temp_C, week_index))
@@ -179,7 +180,7 @@ spearman_plot <- ggcorrplot::ggcorrplot(R_sp$r, p.mat = R_sp$P, title = "Spearma
 spearman_plot
 ```
 
-Při pohledu na matici Spearmanova korelačního koeficientu lze (dle očekávání) vidět zápornou korelaci mezi počty cyklistů a úhrnem srážek. Taktéž lze pozorovat pozitivní korelaci mezi počtem cyklistů a teplotou.
+Looking at the Spearman's correlation coefficient matrix, one can see (as expected) a negative correlation between the number of cyclists and precipitation totals. A positive correlation between the number of cyclists and temperature can also be observed.
 
 ```{r}
 ggplot(data_long, aes(x = name, y = value, fill = name)) +
@@ -198,79 +199,79 @@ ggplot(data_long, aes(x = name, y = value, fill = name)) +
     stat_qq_line() +
     labs(x = "Theoretical Quantiles", y = "Empirical Quantiles")
 ```
-Na QQ plotu můžeme vidět, že u většiny skupin máme důvod se domnívat, že je normalita výrazně porušena.
+On the QQ plot, we can see that for most groups, we have reason to believe that normality is significantly violated.
 
-## Bayesovska analyza
+## Bayesian Analysis
 
-Cílem analýzy je zjistit, jak se během sledovaného období mění počet cyklistů na sledovaných mostech.
+The goal of the analysis is to determine how the number of cyclists on the monitored bridges changes during the observation period.
 
-### Poissonův model
+### Poisson Model
 
-Pozorujeme i.i.d poissonovské náhodné veličiny $(Y_k \mid \theta) \sim \text{Po}(\theta), \; \; k = 1, \dots , n$.
+We observe i.i.d Poisson random variables $(Y_k \mid \theta) \sim \text{Po}(\theta), \; \; k = 1, \dots , n$.
 
-Náš parametrický prostor je $\mathcal{T} = (0, \infty)$ a výběrový prostor $\mathcal{Y} = \mathcal{N}_0$
+Our parameter space is $\mathcal{T} = (0, \infty)$ and the sample space $\mathcal{Y} = \mathcal{N}_0$.
 
-Postačující statistikou je celkový počet cyklistů za sledované období: $Y = \sum_{k = 1}^n Y_k$, experiment má pak rozdělení: $$(Y\mid \theta) \sim \text{Po}(n \theta)$$
+The sufficient statistic is the total number of cyclists during the monitored period: $Y = \sum_{k = 1}^n Y_k$. The experiment then has the distribution: $$(Y\mid \theta) \sim \text{Po}(n \theta)$$
 
-Věrohodnostní funkce má formu:
-
-$$
-f(y \mid \theta) \propto L(\theta; y) = (n \theta)^y e^{-n  \theta}
-$$
-
-Aposteriorní rozdělení pak definujeme následovně:
+The likelihood function has the form:
 
 $$
-(\Theta \mid Y = y) \sim \text{Gama}(a + y, b + n)
+f(y \mid \theta) \propto L(\theta; y) = (n \theta)^y e^{-n \theta}
 $$
 
-Některé číselné charakteristiky aposteriorního rozdělení:
+The posterior distribution is then defined as follows:
+
+$$
+(\Theta \mid Y = y) \sim \text{Gamma}(a + y, b + n)
+$$
+
+Some numerical characteristics of the posterior distribution:
 
 $$
 E(\Theta \mid Y = y) = \frac{a + y}{b + n}, \; \; Var(\Theta \mid Y = y) = \frac{a + y}{(b + n)^2}, \;\; \text{Mode}(\Theta \mid Y = y) = \frac{a + y - 1}{b + n}
 $$
 
-## Déštivé vs suché dny
+## Rainy vs Dry Days
 
-První otázka, která mě ohledně dat zajímala je do jaké míry ovlivní přítomnost deště počet cyklistů.
+The first question that interested me about the data is to what extent the presence of rain affects the number of cyclists.
 
-Pro apriorní model počtu cyklistů ve dnech, kdy pršelo, jsem konzultoval dostupnou relevantní literaturu. Keay (1992) zjistil, že lehký déšť odradil od jízdy na kole až 50 % dotázaných žen. Nankervis (1999) reportuje 67% pokles cyklistů vlivem silného deště. Phang a Rose (2007) pak uvádí "jen" 13 - 25% pokles cyklistů během dešťě v Melbourne.
+For the prior model of the number of cyclists on days when it rained, I consulted available relevant literature. Keay (1992) found that light rain deterred up to 50% of surveyed women from cycling. Nankervis (1999) reported a 67% decrease in cyclists due to heavy rain. Phang and Rose (2007) then state "only" a 13 - 25% decrease in cyclists during rain in Melbourne.
 
-Pro model počtu cyklistů v dnech, kdy pršelo, jsem se tedy rozhodl pro (vcelku vágní) apriorní informaci, že v těchto případech bude apriorní střední hodnota o 40 % menší než v "suchých" dnech.
+For the model of the number of cyclists on days when it rained, I therefore decided on (rather vague) prior information that in these cases the prior mean value would be 40% lower than on "dry" days.
 
-### Volba apriorniho a aposteriorního rozdělení
+### Choice of Prior and Posterior Distribution
 
-Jelikoz nemame zadnou presnejsi apriorni informaci o parametru $\theta$, pouzijeme pouze slabe informativni rozdeleni. Vhodnou volbou je Gama rozdělení, neboť pro Poissonův model tvoří konjugovaný systém hustot.
+Since we have no precise prior information about the parameter $\theta$, we will use only a weakly informative distribution. A suitable choice is the Gamma distribution, as it forms a conjugate family of densities for the Poisson model.
 
-Apriorní rozdělení tedy vypadá následovně: $$
-\Theta \sim \text{Gama}(a, b), \quad \mathcal{T} = (0; \infty), \quad a,b > 0, \quad p(\theta) \propto \theta^{a - 1}e^{-b\theta}{b}
+The prior distribution thus looks as follows: $$
+\Theta \sim \text{Gamma}(a, b), \quad \mathcal{T} = (0; \infty), \quad a,b > 0, \quad p(\theta) \propto \theta^{a - 1}e^{-b\theta}{b}
 $$
 
 
-Některé z číselných charakteristik tohoto rozdělení: $$
+Some of the numerical characteristics of this distribution: $$
 E(\Theta) = \frac{a}{b}, \quad Var(\Theta) = \frac{a}{b^2}, \quad Mode(\Theta) = \frac{a - 1}{b}
 $$
 
-Stredni hodnotu aposteriorního rozdělení můžeme zapsat jako konvexní kombinaci střední hodnoty apriorního rozdělení a výběrového průměru: $$
+The mean of the posterior distribution can be written as a convex combination of the prior mean and the sample mean: $$
 E(\Theta \mid y) = \frac{b}{b + n} E(\Theta) + \frac{n}{b + n} \bar{y}
 $$
 
-Kvůli nedostatku apriorních znalostí jsem se snažil volit parametry apriorního rozdělení tak, aby apriorní střední hodnota byla blízko výběrovému průměru a aby byl apriorní rozptyl mnohem větší než výběrový. Ve všech případech jsem zvolil $b = 0.001 << n$, což vyústí v $E(\Theta \mid y) \approx \bar{y}, \quad Var(\Theta \mid y) \approx \frac{\bar{y}}{n}$. Nechávám tedy data "mluvit samy za sebe".
+Due to the lack of prior knowledge, I tried to choose the parameters of the prior distribution such that the prior mean was close to the sample mean and the prior variance was much larger than the sample variance. In all cases, I chose $b = 0.001 << n$, which results in $E(\Theta \mid y) \approx \bar{y}, \quad Var(\Theta \mid y) \approx \frac{\bar{y}}{n}$. Thus, I let the data "speak for itself".
 
 
-Z výše uvedené diskuze ohledně výkyvu počtu cyklistů během deštivých dní, jsem se rozhodl vytvořit konvexní směs ze dvou apriorních hustot: jedné pro deštivé a druhé pro suché dny.
+From the discussion above regarding the fluctuation in the number of cyclists during rainy days, I decided to create a convex mixture of two prior densities: one for rainy and one for dry days.
 
-Tato směs bude mít hustotu:
+This mixture will have the density:
 $$
-p(\theta) =  \sum_{i = 1}^2 w_i p_i(\theta)
+p(\theta) = \sum_{i = 1}^2 w_i p_i(\theta)
 $$
-kde $\sum_{i = 1}^2 w_i = 1$
+where $\sum_{i = 1}^2 w_i = 1$
 
-Váha "deštivého" rozdělení je dána poměrem deštivých dní (přibližně 0.3), stejně jsem postupoval při výběru váhy pro "suché" rozdělení.
+The weight of the "rainy" distribution is given by the proportion of rainy days (approximately 0.3); I proceeded similarly when choosing the weight for the "dry" distribution.
 
-Protože apriorní rozdělení je konvexní směs, aposteriorní rozdělení bude také směsí.
+Because the prior distribution is a convex mixture, the posterior distribution will also be a mixture.
 
-Konkrétní volby parametrů jednotlivých hustot, ze kterých je směs tvořena, uvádím v boxu u každého sledovaného mostu.
+The specific choices of parameters for the individual densities that make up the mixture are listed in the box for each monitored bridge.
 
 
 ```{r}
@@ -527,8 +528,7 @@ card(full_screen = TRUE,
        "Distribution characteristics"
      ),
      characteristics_tab,
-     shiny::markdown("Apriorní rozdělení má střední hodnotu pro suché dny 5300 cyklistů a pro deštivé 3180.
-                     Můžeme vidět, že v dnech bez srážek je aposteriorní střední očekávaný počet cyklistů na mostu v Manhattonu 5964 a v deštivých dnech 3512. Z toho je zřejmé, že apriorní informace byla lehce podhodnocena. Při pohledu na MLE a MAP odhady je ale zřejmé, že apriorní informace měla na tyto výsledky nicotný vliv, a to zejména díky obrovskému apriornímu rozptylu.")
+     shiny::markdown("The prior distribution has a mean value of 5300 cyclists for dry days and 3180 for rainy days. We can see that on days without precipitation, the posterior expected number of cyclists on the Manhattan bridge is 5964, and on rainy days it is 3512. From this, it is clear that the prior information was slightly underestimated. However, looking at the MLE and MAP estimates, it is evident that the prior information had a negligible effect on these results, mainly due to the huge prior variance.")
   )
 
 ```
@@ -699,8 +699,7 @@ fwrite(tab_all_bridges, "data/tab_all_bridges.csv")
 
 ```
 
-### Charakteristiky všech rozdělení
-
+### Characteristics of All Distributions
 ```{r}
 #| column: screen
 #| out-width: 100%
@@ -714,7 +713,7 @@ card(full_screen = TRUE,
   )
 ```
 
-Podle očekávání se potvrzuje, že střední hodnota a MAP jsou u všech mostů nižší pro deštivé dny. Stejně tak je jasné, že naše apriorní rozdělení je velice slabě informativní a dosažené výsledky se téměř neliší od maximálně věrohodných odhadů.
+As expected, it is confirmed that the mean and MAP are lower for all bridges on rainy days. It is also clear that our prior distribution is very weakly informative, and the achieved results hardly differ from the maximum likelihood estimates.
 
 ```{python}
 #| warning: false
@@ -723,21 +722,23 @@ Podle očekávání se potvrzuje, že střední hodnota a MAP jsou u všech most
 #get_plotly_distribution_plot(tab).show()
 ```
 
-## Prediktivní rozdělení
+## Predictive Distribution
 
-Na závěr je vhodné se také podívat na možnost predikce pro další (dosud nepozorované dny). Sestrojíme tedy prediktivní rozdělení.
+Finally, it is appropriate to also look at the possibility of prediction for future (hitherto unobserved) days. We will therefore construct the predictive distribution.
 
-Prediktivní rozdělení v Poissonovu modelu má negativně binomické rozdělení:
+The predictive distribution in the Poisson model has a negative binomial distribution:
 
 $$
 (Y^*_{n + 1} \mid Y = y) \sim \text{NBi}\biggl(a + y, \frac{b + n}{b + n + 1}\biggl)
 $$
 
-Vybrané číselné charakteristiky tohoto rozdělení vypadají následovně:
+Selected numerical characteristics of this distribution look as follows:
 
 $$
 E(Y^*_{n + 1} \mid Y = y) = \frac{a + y}{b + n} \quad Var(Y^*_{n + 1} \mid Y =y) = \frac{(a + y) (b + n + 1)}{(b + n)^2}
 $$
+
+
 
 ```{r}
 
@@ -783,7 +784,7 @@ plot_predictive <- function(pred_start, pred_end, prior_params, bridge_name) {
   
   pred_full <- rbind(marginal, post_predict)
   
-  predict_plot <- get_predict_dist_plots(pred_full, "predikovaný počet cyklistů")
+  predict_plot <- get_predict_dist_plots(pred_full, "Predicted number of cyclists")
   print(predict_plot)
 }
 
@@ -895,15 +896,15 @@ characteristics_pred_card(williamsburg_precip_prior_params, "williamsburg")
 ```
 :::
 
-## Všední vs víkendové dny
+## Weekdays vs Weekend Days
 
-Další z otázek, kterou bych chtěl zodpovědět je, jak se liší distribuce cyklistů mezi víkendem a pracovními dny. Je možné, že během pracovních dní bude více cyklistů vlivem dojíždění do zaměstnání. Stejně tak je ale možné, že o víkendu bude více sportujících, a tedy i více cyklistů.
+Another question I would like to answer is how the distribution of cyclists differs between weekends and weekdays. It is possible that there will be more cyclists during weekdays due to commuting to work. However, it is equally possible that there will be more people exercising on the weekend, and thus more cyclists.
 
-### Volba apriorního rozdělení
+### Choice of Prior Distribution
 
-Ani v tomto případě nemáme přesnou apriorní informaci o parametru $\theta$. Taktéž bych se nerad spoléhal na existující literaturu, a proto zvolím zcela neinformativní rozdělení ve formě Jeffreysovy hustoty. Pro jednoduchost budu opět pracovat s konjugovaným systémem hustot.
+Once more, we do not have precise prior information about the parameter $\theta$. I also do not want to rely on existing literature, and therefore I will choose a completely non-informative distribution in the form of Jeffreys' prior. For simplicity, I will again work with the conjugate family of densities.
 
-Jeffreysova hustota má tvar $p(\theta) \propto \frac{1}{\sqrt{\theta}}$, což limitně odpovídá rozdělení $Gama(a = \frac{1}{2}, b = 0)$
+Jeffreys' prior has the form $p(\theta) \propto \frac{1}{\sqrt{\theta}}$, which corresponds in the limit to the distribution $Gamma(a = \frac{1}{2}, b = 0)$.
 
 ```{r}
 get_characteristics_day_df <- function(bridge_name, prior_a, prior_b, n_weekday, y_weekday, weekday_post_tab, n_weekend, y_weekend, weekend_post_tab) {
@@ -1182,9 +1183,9 @@ card(full_screen = TRUE,
 :::
 
 
-### Závěr
-Záměrem tohoto projektu bylo analyzovat počet cyklistů během 214 roku 2016. Analýza těchto dat může být vhodná například pro plánování údržby, výstavby nových cyklistických tras a stezek, urbanistické plánování a policy-making.
-Mě samotného zajímaly odpovědi na dvě otázky. Ta první se týká toho, o kolik procent poklesne počet cyklistů ve dnech, kdy byl zaznamenán úhrn srážek (alespon $1 mm^3$). Druhá otázka se zaobírá počtem cyklistů o víkendech a ve všedních dnech. Zajímá mě, jestli více lidí využívá kolo k dojíždění za prací, nebo k víkendovému sportovnímu vyžití.
-Bayesovská analýza ukázala, že v deštivých dnech můžeme očekávat zhruba 40% úbytek počtu cyklistů.
-Dalším závěrem analýzy je, že výrazně více lidí vyráží na kolo během pracovních dni.
+### Conclusion
+The aim of this project was to analyze the number of cyclists during 214 days of the year 2016. The analysis of this data can be useful, for example, for planning maintenance, construction of new cycling routes and paths, urban planning, and policy-making.
+Personally, I was interested in answers to two questions. The first concerns the percentage decrease in the number of cyclists on days when precipitation was recorded (at least $1 mm^3$). The second question deals with the number of cyclists on weekends versus weekdays. I was interested in whether more people use bicycles for commuting to work or for weekend sports activities.
+The Bayesian analysis showed that on rainy days, we can expect roughly a 40% decrease in the number of cyclists.
+Another conclusion of the analysis is that significantly more people go cycling during weekdays.
 
