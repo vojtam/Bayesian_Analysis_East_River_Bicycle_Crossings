@@ -5,5 +5,5 @@
 
 
 
-The interactive report can be found at: [https://vojtam.github.io/Bayesian-Models-Project/](https://vojtam.github.io/Bayesian_Analysis_East_River_Bicycle_Crossings/)
+The interactive report can be found at: [https://vojtam.github.io/Bayesian_Analysis_East_River_Bicycle_Crossings/](https://vojtam.github.io/Bayesian_Analysis_East_River_Bicycle_Crossings/)
 
